@@ -6,16 +6,29 @@ agent reasoning and tool execution:
 
     reason -> verify -> act
 
-It evaluates a proposed action against a simple policy and returns a decision
-object explaining whether the action is allowed, blocked, or should be revised.
+Core vocabulary used here:
 
-This version adds a clean 45° alignment constraint:
+- re-lift5:
+    The verification layer combining numeric scoring + policy checks.
 
-    cos(theta) >= 1 / sqrt(1^2 + 1^2) ~= 0.7071
+- constraint_score:
+    A measurable pre-execution score in [0, 1] used to test whether a proposed
+    action clears the minimum execution threshold.
 
-In practice, actions may include an ``alignment_score`` in [0, 1]. If present,
-that score is checked before policy approval. Scores below the 45° threshold are
-returned as "revise" instead of "allow".
+- action:
+    The external proposed tool call from an agent framework.
+
+- left5:
+    The normalized internal representation used by re-lift5 before a decision
+    is returned.
+
+This version enforces a clean 45° threshold:
+
+    constraint_score >= 1 / sqrt(1^2 + 1^2) ~= 0.7071
+
+Compatibility:
+- Accepts `constraint_score` as the primary field.
+- Also accepts `alignment_score` and `relift5_score` as aliases.
 """
 
 from __future__ import annotations
@@ -27,7 +40,7 @@ from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
 
 
-FORTY_FIVE_DEGREE_THRESHOLD = 1 / sqrt(1**2 + 1**2)  # 1/sqrt(2) ~= 0.7071
+FORTY_FIVE_DEGREE_THRESHOLD = 1 / sqrt(1**2 + 1**2)  # ~= 0.7071
 
 
 @dataclass
@@ -89,8 +102,8 @@ def _domain_allowed(domain: Optional[str], allowed_domains: Iterable[str]) -> bo
     return False
 
 
-def _coerce_alignment_score(raw_score: Any) -> Optional[float]:
-    """Parse alignment_score into a float in [0, 1], or return None."""
+def _coerce_score(raw_score: Any) -> Optional[float]:
+    """Parse a numeric score into a float in [0, 1], or return None."""
     if raw_score is None:
         return None
     try:
@@ -103,46 +116,99 @@ def _coerce_alignment_score(raw_score: Any) -> Optional[float]:
     return score
 
 
-def _check_alignment(action: Dict[str, Any]) -> Optional[Decision]:
+def _extract_constraint_score(action: Dict[str, Any]) -> tuple[Optional[float], Optional[str], Any]:
     """
-    Enforce a 45° alignment threshold when alignment_score is present.
+    Extract score from preferred field names.
 
-    alignment_score:
-        Float in [0, 1], interpreted as cosine-style alignment strength.
+    Returns
+    -------
+    (score, source_field, raw_value)
+    """
+    score_fields = ("constraint_score", "alignment_score", "relift5_score")
+    for field_name in score_fields:
+        if field_name in action:
+            raw_value = action.get(field_name)
+            return _coerce_score(raw_value), field_name, raw_value
+    return None, None, None
+
+
+def normalize_action(action: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Convert an external action into the internal left5 structure.
+
+    left5 fields:
+    - tool
+    - params
+    - constraint_score
+    - score_source
+    - raw
+    """
+    score, source_field, raw_value = _extract_constraint_score(action)
+
+    params = {
+        "path": action.get("path"),
+        "url": action.get("url"),
+        "method": action.get("method"),
+        "command": action.get("command"),
+        "content": action.get("content"),
+    }
+
+    return {
+        "tool": action.get("tool"),
+        "params": {k: v for k, v in params.items() if v is not None},
+        "constraint_score": score,
+        "score_source": source_field,
+        "raw_score_value": raw_value,
+        "raw": action,
+    }
+
+
+def _check_constraint(left5: Dict[str, Any]) -> Optional[Decision]:
+    """
+    Enforce the 45° constraint threshold when a score field is present.
+
+    constraint_score:
+        Float in [0, 1], interpreted as pre-execution constraint fitness.
 
     Returns
     -------
     Decision | None
-        A blocking/revision decision when the score is invalid or below threshold.
-        None means the action passes the alignment layer or did not provide a score.
+        A revision decision when the score is invalid or below threshold.
+        None means the action passes the numeric constraint layer or no score
+        was provided.
     """
-    raw_score = action.get("alignment_score")
+    source_field = left5.get("score_source")
+    score = left5.get("constraint_score")
+    raw_value = left5.get("raw_score_value")
 
-    # Alignment is optional in this minimal implementation.
-    if raw_score is None:
+    # Score is optional in this minimal implementation.
+    if source_field is None:
         return None
 
-    score = _coerce_alignment_score(raw_score)
     if score is None:
         return Decision(
             allow=False,
-            reason="alignment_score must be a number between 0.0 and 1.0.",
+            reason=f"{source_field} must be a number between 0.0 and 1.0.",
             action="revise",
-            details={"alignment_score": raw_score},
+            details={
+                "field": source_field,
+                "value": raw_value,
+            },
         )
 
     if score < FORTY_FIVE_DEGREE_THRESHOLD:
         return Decision(
             allow=False,
             reason=(
-                "Alignment below 45° threshold: "
+                "Constraint score below 45° threshold: "
                 f"{score:.4f} < {FORTY_FIVE_DEGREE_THRESHOLD:.4f}"
             ),
             action="revise",
             details={
-                "alignment_score": score,
+                "constraint_score": score,
                 "threshold": FORTY_FIVE_DEGREE_THRESHOLD,
-                "constraint": "cos(theta) >= 1/sqrt(1^2 + 1^2)",
+                "score_source": source_field,
+                "constraint": "score >= 1/sqrt(1^2 + 1^2)",
             },
         )
 
@@ -189,20 +255,16 @@ def verify_action(
     policy: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
-    Verify a proposed agent action against a policy.
+    Verify a proposed agent action against re-lift5 scoring + policy rules.
 
-    The verification pipeline is:
+    Pipeline:
 
-        reason -> verify alignment -> verify policy -> act
+        action -> left5 -> constraint check -> policy check -> decision
 
     Parameters
     ----------
     action:
-        Dictionary describing the requested operation. Typical examples:
-            {"tool": "file_write", "path": "/workspace/output/a.txt"}
-            {"tool": "http_request", "url": "https://api.openai.com/v1/responses", "method": "POST"}
-            {"tool": "shell", "command": "rm -rf /"}
-            {"tool": "http_request", "url": "https://api.openai.com", "alignment_score": 0.82}
+        External action proposed by an agent framework.
 
     policy:
         Optional policy dictionary. If omitted, DEFAULT_POLICY is used.
@@ -220,8 +282,9 @@ def verify_action(
             }
     """
     policy = policy or DEFAULT_POLICY
+    left5 = normalize_action(action)
 
-    tool = action.get("tool")
+    tool = left5.get("tool")
     if not tool:
         return Decision(
             allow=False,
@@ -230,16 +293,15 @@ def verify_action(
             details={"missing_field": "tool"},
         ).to_dict()
 
-    # 45° alignment gate comes first.
-    alignment_decision = _check_alignment(action)
-    if alignment_decision is not None:
-        return alignment_decision.to_dict()
+    constraint_decision = _check_constraint(left5)
+    if constraint_decision is not None:
+        return constraint_decision.to_dict()
 
     for rule in policy.get("rules", []):
         if rule.get("tool") != tool:
             continue
 
-        decision = _evaluate_rule(action=action, rule=rule)
+        decision = _evaluate_rule(left5=left5, rule=rule)
         if decision is not None:
             return decision.to_dict()
 
@@ -249,29 +311,32 @@ def verify_action(
             allow=True,
             reason=f"No specific rule matched tool '{tool}'; default policy allows it.",
             action="allow",
+            details={"left5": left5},
         ).to_dict()
 
     return Decision(
         allow=False,
         reason=f"No policy rule matched tool '{tool}'; default policy blocks it.",
         action="block",
+        details={"left5": left5},
     ).to_dict()
 
 
-def _evaluate_rule(action: Dict[str, Any], rule: Dict[str, Any]) -> Optional[Decision]:
+def _evaluate_rule(left5: Dict[str, Any], rule: Dict[str, Any]) -> Optional[Decision]:
     """Return a decision if the rule applies; otherwise None."""
-    tool = action.get("tool")
+    tool = left5.get("tool")
     rule_name = rule.get("name")
+    params = left5.get("params", {})
 
-    if tool == "file_read" or tool == "file_write":
-        path = action.get("path")
+    if tool in ("file_read", "file_write"):
+        path = params.get("path")
         if not path:
             return Decision(
                 allow=False,
                 reason=f"Tool '{tool}' requires a 'path'.",
                 action="revise",
                 matched_rule=rule_name,
-                details={"missing_field": "path"},
+                details={"missing_field": "path", "left5": left5},
             )
 
         allowed_paths = rule.get("allowed_paths", [])
@@ -281,7 +346,7 @@ def _evaluate_rule(action: Dict[str, Any], rule: Dict[str, Any]) -> Optional[Dec
                 reason=rule.get("reason", "Path allowed by policy."),
                 action=rule.get("on_match", "allow"),
                 matched_rule=rule_name,
-                details={"path": path},
+                details={"path": path, "left5": left5},
             )
 
         return Decision(
@@ -289,12 +354,12 @@ def _evaluate_rule(action: Dict[str, Any], rule: Dict[str, Any]) -> Optional[Dec
             reason=f"Path '{path}' is outside approved locations.",
             action="block",
             matched_rule=rule_name,
-            details={"path": path, "allowed_paths": allowed_paths},
+            details={"path": path, "allowed_paths": allowed_paths, "left5": left5},
         )
 
     if tool == "http_request":
-        url = action.get("url")
-        method = str(action.get("method", "GET")).upper()
+        url = params.get("url")
+        method = str(params.get("method", "GET")).upper()
 
         if not url:
             return Decision(
@@ -302,7 +367,7 @@ def _evaluate_rule(action: Dict[str, Any], rule: Dict[str, Any]) -> Optional[Dec
                 reason="HTTP request requires a 'url'.",
                 action="revise",
                 matched_rule=rule_name,
-                details={"missing_field": "url"},
+                details={"missing_field": "url", "left5": left5},
             )
 
         allowed_methods = [m.upper() for m in rule.get("allowed_methods", ["GET"])]
@@ -312,7 +377,7 @@ def _evaluate_rule(action: Dict[str, Any], rule: Dict[str, Any]) -> Optional[Dec
                 reason=f"HTTP method '{method}' is not allowed.",
                 action="block",
                 matched_rule=rule_name,
-                details={"method": method, "allowed_methods": allowed_methods},
+                details={"method": method, "allowed_methods": allowed_methods, "left5": left5},
             )
 
         domain = _extract_domain(url)
@@ -323,7 +388,7 @@ def _evaluate_rule(action: Dict[str, Any], rule: Dict[str, Any]) -> Optional[Dec
                 reason=rule.get("reason", "Domain allowed by policy."),
                 action=rule.get("on_match", "allow"),
                 matched_rule=rule_name,
-                details={"url": url, "domain": domain, "method": method},
+                details={"url": url, "domain": domain, "method": method, "left5": left5},
             )
 
         return Decision(
@@ -331,7 +396,7 @@ def _evaluate_rule(action: Dict[str, Any], rule: Dict[str, Any]) -> Optional[Dec
             reason=f"Domain '{domain}' is not on the allowlist.",
             action="block",
             matched_rule=rule_name,
-            details={"url": url, "domain": domain, "allowed_domains": allowed_domains},
+            details={"url": url, "domain": domain, "allowed_domains": allowed_domains, "left5": left5},
         )
 
     if tool == "shell":
@@ -340,7 +405,7 @@ def _evaluate_rule(action: Dict[str, Any], rule: Dict[str, Any]) -> Optional[Dec
             reason=rule.get("reason", "Shell policy applied."),
             action=rule.get("on_match", "block"),
             matched_rule=rule_name,
-            details={"command": action.get("command")},
+            details={"command": params.get("command"), "left5": left5},
         )
 
     on_match = rule.get("on_match", "block")
@@ -349,7 +414,7 @@ def _evaluate_rule(action: Dict[str, Any], rule: Dict[str, Any]) -> Optional[Dec
         reason=rule.get("reason", f"Policy applied for tool '{tool}'."),
         action=on_match,
         matched_rule=rule_name,
-        details={"tool": tool},
+        details={"tool": tool, "left5": left5},
     )
 
 
@@ -359,30 +424,36 @@ if __name__ == "__main__":
             "tool": "file_write",
             "path": "/workspace/output/report.txt",
             "content": "ok",
-            "alignment_score": 0.91,
+            "constraint_score": 0.91,
+        },
+        {
+            "tool": "file_write",
+            "path": "/workspace/output/report.txt",
+            "content": "legacy alias still accepted",
+            "alignment_score": 0.84,
         },
         {
             "tool": "file_write",
             "path": "/workspace/output/report.txt",
             "content": "needs revision",
-            "alignment_score": 0.65,
+            "relift5_score": 0.65,
         },
         {
             "tool": "http_request",
             "url": "https://api.openai.com/v1/responses",
             "method": "POST",
-            "alignment_score": 0.81,
+            "constraint_score": 0.81,
         },
         {
             "tool": "http_request",
             "url": "https://evil.example.net/steal",
             "method": "POST",
-            "alignment_score": 0.95,
+            "constraint_score": 0.95,
         },
         {
             "tool": "shell",
             "command": "rm -rf /",
-            "alignment_score": 0.99,
+            "constraint_score": 0.99,
         },
     ]
 
