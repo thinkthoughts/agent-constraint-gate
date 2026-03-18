@@ -1,7 +1,8 @@
 # agent-constraint-gate
 
 **Constraint gate for autonomous AI agents**  
-Verify actions before execution to prevent unsafe behavior (OpenClaw-compatible)
+Verify actions before execution using **re-lift5 (constraint threshold + policy enforcement)**  
+(OpenClaw-compatible)
 
 ---
 
@@ -9,47 +10,59 @@ Verify actions before execution to prevent unsafe behavior (OpenClaw-compatible)
 
 Most agent systems follow:
 
-```text
 reason → act
-```
 
 This repo introduces a constraint layer:
 
-```text
-reason → verify (45°) → act
-```
-
-The goal is simple:
-
-> **Prevent unsafe tool execution before it happens**
+reason → verify (re-lift5: constraint threshold + policy) → act
 
 ---
 
-## 📐 45° Constraint (Core Idea)
+## 📐 re-lift5 (Core Specification)
 
-This repo enforces a geometric alignment threshold:
+**re-lift5** is the verification layer combining:
 
-```text
-cos(θ) ≥ 1 / √(1² + 1²) ≈ 0.707
-```
+- **constraint_score (numeric constraint check)**
+- **policy enforcement (YAML rules)**
+
+An action must satisfy both before execution.
+
+---
+
+## 📊 constraint_score
+
+constraint_score ∈ [0,1]
+
+- Represents how well an action satisfies required constraints before execution  
+- Acts as a **pre-execution filter**
+
+### Threshold
+
+constraint_score ≥ 1 / √(1² + 1²) ≈ 0.707
 
 Interpretation:
-- Actions include an optional `alignment_score ∈ [0,1]`
-- If `alignment_score < 0.707`, the action is **revised (blocked from execution)**
 
-This adds a **continuous safety constraint** on top of rule-based checks.
+- ≥ 0.707 → eligible for policy check  
+- < 0.707 → revise (blocked before execution)
 
 ---
 
 ## ⚠️ Problem
 
-Agent frameworks (like OpenClaw) can:
+Agent frameworks (e.g., OpenClaw) can:
+
 - execute file operations  
 - call APIs  
-- send messages  
+- run system commands  
 
-But they often lack a **pre-execution constraint check**, leading to:
+But typically lack:
+
+**a pre-execution constraint layer**
+
+This leads to:
+
 - prompt injection exploits  
+- unsafe tool execution  
 - data exfiltration  
 - unintended autonomous actions  
 
@@ -57,12 +70,13 @@ But they often lack a **pre-execution constraint check**, leading to:
 
 ## ✅ Solution
 
-Add a **constraint gate** between reasoning and action.
+Insert a **re-lift5 constraint gate** between reasoning and action.
 
-The gate:
-1. **Checks alignment (45° threshold)**  
-2. **Verifies policy rules (YAML)**  
-3. **Approves / blocks / revises before execution**
+Pipeline:
+
+1. constraint_score check (threshold)
+2. policy check (YAML rules)
+3. allow / revise / block
 
 ---
 
@@ -74,7 +88,7 @@ from constraint import verify_action
 action = {
     "tool": "http_request",
     "url": "https://api.openai.com",
-    "alignment_score": 0.65
+    "constraint_score": 0.82
 }
 
 decision = verify_action(action)
@@ -87,79 +101,92 @@ else:
 
 ---
 
-## 📊 Behavior
-
-| Alignment Score | Result |
-|----------------|--------|
-| ≥ 0.707        | Continue to policy checks |
-| < 0.707        | Revise (blocked before execution) |
-
----
-
-## 📐 Policy (example)
+## 📐 Policy Layer (YAML)
 
 ```yaml
 rules:
   - tool: file_write
     allowed_paths:
       - "/workspace/output"
+
   - tool: http_request
     allowed_domains:
       - "api.openai.com"
 ```
 
+Policy defines:
+what is allowed
+
+re-lift5 ensures:
+whether the action qualifies before execution
+
 ---
 
 ## 🔗 OpenClaw Integration
 
-```text
-OpenClaw reasoning
-        ↓
-constraint gate (this repo)
-        ↓
-tool execution
-```
+OpenClaw reasoning  
+↓  
+re-lift5 constraint gate (this repo)  
+↓  
+tool execution  
 
-See: `examples/openclaw.md`
+Hook point:
+
+```python
+decision = verify_action(action)
+```
 
 ---
 
 ## 🧠 Design Principles
 
-- **Verify-before-act** (not react-after-harm)  
-- **Geometric constraint (45°)** for alignment  
-- **Policy-driven rules (YAML)**  
-- **Framework-agnostic** (OpenClaw-compatible)  
+- Verify-before-act  
+- Numeric constraint threshold (45°)  
+- Policy-driven rules  
+- Framework-agnostic  
+
+---
+
+## 📐 Formal Specification
+
+An action is allowed iff:
+
+constraint_score ≥ 1 / √(1² + 1²)  
+AND  
+action satisfies policy.yaml  
+
+Otherwise:
+
+→ action = revise OR block
 
 ---
 
 ## 🚀 Use Cases
 
 - Autonomous agents (OpenClaw, AutoGPT-style systems)  
-- Local agents with file/system access  
-- API-calling assistants  
+- Local agents with system access  
+- API-executing assistants  
 - Agent safety / alignment research  
 
 ---
 
 ## 📌 Status
 
-Minimal prototype with:
-- rule-based policy enforcement  
-- 45° alignment constraint  
+Minimal working prototype with:
 
-Contributions welcome.
+- numeric constraint enforcement  
+- policy validation  
+- modular integration  
 
 ---
 
 ## 📎 Reference
 
-Antiviolent Intelligence framework:  
 https://antiviolentintelligence.ai/9423-invariantV2.pdf
 
 ---
 
 ## 🧭 Summary
 
-> Agents can act.  
-> This ensures they **act within constraint**.
+Agents can act.  
+re-lift5 ensures they act within constraint + policy.
