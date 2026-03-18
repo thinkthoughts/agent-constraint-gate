@@ -16,12 +16,28 @@ reason → act
 This repo introduces a constraint layer:
 
 ```text
-reason → verify → act
+reason → verify (45°) → act
 ```
 
 The goal is simple:
 
 > **Prevent unsafe tool execution before it happens**
+
+---
+
+## 📐 45° Constraint (Core Idea)
+
+This repo enforces a geometric alignment threshold:
+
+```text
+cos(θ) ≥ 1 / √(1² + 1²) ≈ 0.707
+```
+
+Interpretation:
+- Actions include an optional `alignment_score ∈ [0,1]`
+- If `alignment_score < 0.707`, the action is **revised (blocked from execution)**
+
+This adds a **continuous safety constraint** on top of rule-based checks.
 
 ---
 
@@ -32,7 +48,7 @@ Agent frameworks (like OpenClaw) can:
 - call APIs  
 - send messages  
 
-But they often lack a **pre-execution constraint check**, which can lead to:
+But they often lack a **pre-execution constraint check**, leading to:
 - prompt injection exploits  
 - data exfiltration  
 - unintended autonomous actions  
@@ -44,9 +60,9 @@ But they often lack a **pre-execution constraint check**, which can lead to:
 Add a **constraint gate** between reasoning and action.
 
 The gate:
-1. **Observes** the proposed action  
-2. **Verifies** it against a policy  
-3. **Approves / blocks / revises** before execution  
+1. **Checks alignment (45° threshold)**  
+2. **Verifies policy rules (YAML)**  
+3. **Approves / blocks / revises before execution**
 
 ---
 
@@ -56,9 +72,9 @@ The gate:
 from constraint import verify_action
 
 action = {
-    "tool": "file_write",
-    "path": "/sensitive/data.txt",
-    "content": "..."
+    "tool": "http_request",
+    "url": "https://api.openai.com",
+    "alignment_score": 0.65
 }
 
 decision = verify_action(action)
@@ -71,25 +87,30 @@ else:
 
 ---
 
+## 📊 Behavior
+
+| Alignment Score | Result |
+|----------------|--------|
+| ≥ 0.707        | Continue to policy checks |
+| < 0.707        | Revise (blocked before execution) |
+
+---
+
 ## 📐 Policy (example)
 
 ```yaml
 rules:
   - tool: file_write
-    allow: false
-    paths:
-      - "/safe/"
+    allowed_paths:
+      - "/workspace/output"
   - tool: http_request
-    allow_domains:
+    allowed_domains:
       - "api.openai.com"
-      - "example.com"
 ```
 
 ---
 
-## 🔗 OpenClaw Integration (example)
-
-Insert constraint check before tool execution:
+## 🔗 OpenClaw Integration
 
 ```text
 OpenClaw reasoning
@@ -105,10 +126,10 @@ See: `examples/openclaw.md`
 
 ## 🧠 Design Principles
 
-- **Verify-before-act** over react-after-harm  
-- **Small, composable layer** (not a full agent framework)  
-- **Policy-driven** (YAML or programmable)  
-- **Framework-agnostic** (works with any agent system)  
+- **Verify-before-act** (not react-after-harm)  
+- **Geometric constraint (45°)** for alignment  
+- **Policy-driven rules (YAML)**  
+- **Framework-agnostic** (OpenClaw-compatible)  
 
 ---
 
@@ -117,14 +138,17 @@ See: `examples/openclaw.md`
 - Autonomous agents (OpenClaw, AutoGPT-style systems)  
 - Local agents with file/system access  
 - API-calling assistants  
-- Research on agent safety and alignment  
+- Agent safety / alignment research  
 
 ---
 
 ## 📌 Status
 
-Minimal prototype — designed for clarity and integration.  
-Contributions and feedback welcome.
+Minimal prototype with:
+- rule-based policy enforcement  
+- 45° alignment constraint  
+
+Contributions welcome.
 
 ---
 
@@ -138,4 +162,4 @@ https://antiviolentintelligence.ai/9423-invariantV2.pdf
 ## 🧭 Summary
 
 > Agents can act.  
-> This ensures they **act safely**.
+> This ensures they **act within constraint**.
