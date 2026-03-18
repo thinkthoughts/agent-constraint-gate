@@ -1,0 +1,56 @@
+# agent-constraint-gate policy
+# Defines rules for verify-before-act constraint layer
+
+default_action: block
+
+rules:
+  - name: allow_safe_file_reads
+    tool: file_read
+    allowed_paths:
+      - "/workspace"
+      - "/tmp"
+      - "./"
+    on_match: allow
+    reason: "File read limited to approved paths."
+
+  - name: restrict_file_writes
+    tool: file_write
+    allowed_paths:
+      - "/workspace/output"
+      - "/tmp"
+      - "./output"
+    on_match: allow
+    reason: "File write limited to approved output paths."
+
+  - name: allow_known_http_domains
+    tool: http_request
+    allowed_domains:
+      - "api.openai.com"
+      - "example.com"
+    allowed_methods:
+      - "GET"
+      - "POST"
+    on_match: allow
+    reason: "HTTP requests limited to approved domains and methods."
+
+  - name: block_shell_access
+    tool: shell
+    on_match: block
+    reason: "Shell access blocked by default."
+
+  - name: restrict_file_delete
+    tool: file_delete
+    allowed_paths:
+      - "/workspace/output"
+      - "/tmp"
+    on_match: allow
+    reason: "File deletion limited to safe directories."
+
+  - name: restrict_external_post
+    tool: http_request
+    allowed_domains:
+      - "api.openai.com"
+    allowed_methods:
+      - "GET"
+    on_match: allow
+    reason: "POST requests restricted unless explicitly allowed."
