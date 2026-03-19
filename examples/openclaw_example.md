@@ -1,6 +1,10 @@
 # OpenClaw Integration Example
 
-This document shows how to integrate **agent-constraint-gate** with an OpenClaw-style agent.
+This document shows how to integrate **agent-constraint-gate** with an OpenClaw-style agent using the updated spec:
+
+- re-lift5 (verification layer)
+- constraint_score (numeric threshold)
+- left5 (normalized internal structure)
 
 ---
 
@@ -8,9 +12,7 @@ This document shows how to integrate **agent-constraint-gate** with an OpenClaw-
 
 Insert a constraint check between reasoning and action:
 
-```text
-reason → verify (45° + policy) → act
-```
+reason → verify (re-lift5: constraint threshold + policy) → act
 
 ---
 
@@ -22,7 +24,7 @@ In OpenClaw (or similar agents), tool execution typically looks like:
 result = tool.execute(action)
 ```
 
-You insert the constraint gate **right before this line**.
+You insert the constraint gate **right before execution**.
 
 ---
 
@@ -32,13 +34,13 @@ You insert the constraint gate **right before this line**.
 from constraint import verify_action
 
 def safe_execute(action, tool):
-    decision = verify_action(action)
+    decision = verify_action(action)  # re-lift5 enforcement
 
     if decision["allow"]:
         return tool.execute(action)
 
     # Block or revise
-    print("Blocked by constraint gate:", decision["reason"])
+    print("Blocked by re-lift5:", decision["reason"])
     return {
         "error": "blocked",
         "reason": decision["reason"],
@@ -48,46 +50,58 @@ def safe_execute(action, tool):
 
 ---
 
-## 📐 Example Action (with 45° constraint)
+## 📐 Example Action
 
 ```python
 action = {
     "tool": "http_request",
     "url": "https://api.openai.com",
     "method": "POST",
-    "alignment_score": 0.65
+    "constraint_score": 0.65
 }
 ```
 
 Result:
 
-```text
-Blocked: Alignment below 45° threshold
-```
+Blocked before execution due to constraint threshold (< 0.707)
 
 ---
 
 ## 📊 Full Flow
 
-```text
-User input
-    ↓
-LLM reasoning
-    ↓
-Proposed action
-    ↓
-verify_action(action)   ← THIS REPO
-    ↓
-(allow) → execute tool
-(block) → return error
-(revise) → send back to model
-```
+User input  
+↓  
+LLM reasoning  
+↓  
+Proposed action (external)  
+↓  
+re-lift5 verification (this repo)  
+↓  
+(allow) → execute tool  
+(revise/block) → return decision  
 
 ---
 
-## 🔁 Optional: Revision Loop (stronger pattern)
+## 🧠 Internal Structure (left5)
 
-Instead of blocking completely, you can loop back:
+Inside the constraint layer, actions are normalized:
+
+action → left5
+
+left5 includes:
+
+- tool  
+- params (path, url, method, etc.)  
+- constraint_score  
+- metadata  
+
+This ensures consistent verification before policy checks.
+
+---
+
+## 🔁 Optional: Revision Loop
+
+Instead of blocking completely, loop back:
 
 ```python
 if decision["action"] == "revise":
@@ -95,27 +109,9 @@ if decision["action"] == "revise":
     return model.revise(action)
 ```
 
-This enables:
+Flow becomes:
 
-```text
 reason → verify → revise → verify → act
-```
-
----
-
-## 🧠 What this adds to OpenClaw
-
-Without constraint gate:
-
-```text
-reason → act
-```
-
-With constraint gate:
-
-```text
-reason → verify (alignment + policy) → act
-```
 
 ---
 
@@ -125,15 +121,15 @@ This prevents:
 
 - execution of unsafe file paths  
 - requests to unapproved domains  
-- low-alignment actions (below 45° threshold)  
-- unrestricted shell commands  
+- actions below constraint threshold  
+- unrestricted system commands  
 
 ---
 
 ## 🚀 Summary
 
-> OpenClaw handles reasoning and action.  
-> agent-constraint-gate ensures actions are **verified before execution**.
+OpenClaw handles reasoning and action.  
+re-lift5 ensures actions meet constraint + policy before execution.
 
 ---
 
