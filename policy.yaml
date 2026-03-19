@@ -45,12 +45,3 @@ rules:
       - "/tmp"
     on_match: allow
     reason: "File deletion limited to safe directories."
-
-  - name: restrict_external_post
-    tool: http_request
-    allowed_domains:
-      - "api.openai.com"
-    allowed_methods:
-      - "GET"
-    on_match: allow
-    reason: "POST requests restricted unless explicitly allowed."
