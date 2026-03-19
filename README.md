@@ -1,8 +1,15 @@
 # agent-constraint-gate
 
-**Constraint gate for autonomous AI agents**  
-Verify actions before execution using **re-lift5 (constraint threshold + policy enforcement)**  
-(OpenClaw-compatible)
+Constraint gate for autonomous AI agents  
+Verify actions before execution using re-lift5 (constraint threshold + policy enforcement)
+
+---
+
+## 📐 Spec (core)
+
+action → left5 → score → threshold (45°) → policy → decision  
+constraint_score ∈ [0,1], threshold = 1/√(1²+1²) ≈ 0.707  
+decision ∈ {allow, revise, block}
 
 ---
 
@@ -33,7 +40,7 @@ An action must satisfy both before execution.
 
 constraint_score ∈ [0,1]
 
-- Represents how well an action satisfies required constraints before execution  
+- Numeric measure of whether an action satisfies required constraints before execution  
 - Acts as a **pre-execution filter**
 
 ### Threshold
@@ -97,96 +104,3 @@ if decision["allow"]:
     execute(action)
 else:
     print("Blocked:", decision["reason"])
-```
-
----
-
-## 📐 Policy Layer (YAML)
-
-```yaml
-rules:
-  - tool: file_write
-    allowed_paths:
-      - "/workspace/output"
-
-  - tool: http_request
-    allowed_domains:
-      - "api.openai.com"
-```
-
-Policy defines:
-what is allowed
-
-re-lift5 ensures:
-whether the action qualifies before execution
-
----
-
-## 🔗 OpenClaw Integration
-
-OpenClaw reasoning  
-↓  
-re-lift5 constraint gate (this repo)  
-↓  
-tool execution  
-
-Hook point:
-
-```python
-decision = verify_action(action)
-```
-
----
-
-## 🧠 Design Principles
-
-- Verify-before-act  
-- Numeric constraint threshold (45°)  
-- Policy-driven rules  
-- Framework-agnostic  
-
----
-
-## 📐 Formal Specification
-
-An action is allowed iff:
-
-constraint_score ≥ 1 / √(1² + 1²)  
-AND  
-action satisfies policy.yaml  
-
-Otherwise:
-
-→ action = revise OR block
-
----
-
-## 🚀 Use Cases
-
-- Autonomous agents (OpenClaw, AutoGPT-style systems)  
-- Local agents with system access  
-- API-executing assistants  
-- Agent safety / alignment research  
-
----
-
-## 📌 Status
-
-Minimal working prototype with:
-
-- numeric constraint enforcement  
-- policy validation  
-- modular integration  
-
----
-
-## 📎 Reference
-
-https://antiviolentintelligence.ai/9423-invariantV2.pdf
-
----
-
-## 🧭 Summary
-
-Agents can act.  
-re-lift5 ensures they act within constraint + policy.
