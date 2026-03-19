@@ -163,27 +163,115 @@ def normalize_action(action: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def score_action(left5: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Compute a simple heuristic constraint score when none was provided.
+
+    Returns a payload with:
+    - constraint_score
+    - score_breakdown
+    - computed (bool)
+    """
+    tool = left5.get("tool")
+    params = left5.get("params", {})
+
+    score = 1.0
+    breakdown: Dict[str, float] = {
+        "base": 1.0,
+    }
+
+    if not tool:
+        score -= 0.70
+        breakdown["missing_tool_penalty"] = -0.70
+
+    if tool in ("file_read", "file_write"):
+        path = params.get("path")
+        if not path:
+            score -= 0.50
+            breakdown["missing_path_penalty"] = -0.50
+        elif _path_is_within(path, ["/workspace", "/tmp", "./"]):
+            breakdown["safe_path_bonus"] = 0.00
+        else:
+            score -= 0.25
+            breakdown["untrusted_path_penalty"] = -0.25
+
+    if tool == "http_request":
+        url = params.get("url")
+        method = str(params.get("method", "GET")).upper()
+
+        if not url:
+            score -= 0.50
+            breakdown["missing_url_penalty"] = -0.50
+        else:
+            domain = _extract_domain(url)
+            if _domain_allowed(domain, ["api.openai.com", "example.com"]):
+                breakdown["approved_domain_bonus"] = 0.00
+            else:
+                score -= 0.25
+                breakdown["unapproved_domain_penalty"] = -0.25
+
+        if method not in ("GET", "POST"):
+            score -= 0.15
+            breakdown["method_penalty"] = -0.15
+
+    if tool == "shell":
+        score -= 0.40
+        breakdown["shell_penalty"] = -0.40
+
+    if params.get("command") and any(token in str(params["command"]) for token in ("rm -rf", "sudo", "chmod 777")):
+        score -= 0.30
+        breakdown["high_risk_command_penalty"] = -0.30
+
+    score = max(0.0, min(1.0, round(score, 4)))
+
+    return {
+        "constraint_score": score,
+        "score_breakdown": breakdown,
+        "computed": True,
+    }
+
+
+def _ensure_constraint_score(left5: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Populate constraint_score if it is missing.
+
+    If a score is already present, preserve it and mark it as externally supplied.
+    """
+    if left5.get("score_source") is not None:
+        left5["computed"] = False
+        left5["score_breakdown"] = None
+        return left5
+
+    scored = score_action(left5)
+    left5["constraint_score"] = scored["constraint_score"]
+    left5["score_breakdown"] = scored["score_breakdown"]
+    left5["computed"] = scored["computed"]
+    left5["score_source"] = "computed"
+    left5["raw_score_value"] = scored["constraint_score"]
+    return left5
+
+
 def _check_constraint(left5: Dict[str, Any]) -> Optional[Decision]:
     """
-    Enforce the 45° constraint threshold when a score field is present.
-
-    constraint_score:
-        Float in [0, 1], interpreted as pre-execution constraint fitness.
+    Enforce the 45° constraint threshold.
 
     Returns
     -------
     Decision | None
         A revision decision when the score is invalid or below threshold.
-        None means the action passes the numeric constraint layer or no score
-        was provided.
+        None means the action passes the numeric constraint layer.
     """
     source_field = left5.get("score_source")
     score = left5.get("constraint_score")
     raw_value = left5.get("raw_score_value")
 
-    # Score is optional in this minimal implementation.
     if source_field is None:
-        return None
+        return Decision(
+            allow=False,
+            reason="constraint_score is missing and could not be determined.",
+            action="revise",
+            details={"left5": left5},
+        )
 
     if score is None:
         return Decision(
@@ -193,6 +281,7 @@ def _check_constraint(left5: Dict[str, Any]) -> Optional[Decision]:
             details={
                 "field": source_field,
                 "value": raw_value,
+                "left5": left5,
             },
         )
 
@@ -208,6 +297,7 @@ def _check_constraint(left5: Dict[str, Any]) -> Optional[Decision]:
                 "constraint_score": score,
                 "threshold": FORTY_FIVE_DEGREE_THRESHOLD,
                 "score_source": source_field,
+                "score_breakdown": left5.get("score_breakdown"),
                 "constraint": "score >= 1/sqrt(1^2 + 1^2)",
             },
         )
@@ -259,27 +349,7 @@ def verify_action(
 
     Pipeline:
 
-        action -> left5 -> constraint check -> policy check -> decision
-
-    Parameters
-    ----------
-    action:
-        External action proposed by an agent framework.
-
-    policy:
-        Optional policy dictionary. If omitted, DEFAULT_POLICY is used.
-
-    Returns
-    -------
-    dict
-        A decision object:
-            {
-                "allow": bool,
-                "reason": str,
-                "action": "allow" | "block" | "revise",
-                "matched_rule": str | None,
-                "details": {...}
-            }
+        action -> left5 -> score -> threshold check -> policy check -> decision
     """
     policy = policy or DEFAULT_POLICY
     left5 = normalize_action(action)
@@ -292,6 +362,8 @@ def verify_action(
             action="revise",
             details={"missing_field": "tool"},
         ).to_dict()
+
+    left5 = _ensure_constraint_score(left5)
 
     constraint_decision = _check_constraint(left5)
     if constraint_decision is not None:
@@ -423,37 +495,22 @@ if __name__ == "__main__":
         {
             "tool": "file_write",
             "path": "/workspace/output/report.txt",
-            "content": "ok",
+            "content": "computed if missing score",
+        },
+        {
+            "tool": "file_write",
+            "path": "/workspace/output/report.txt",
+            "content": "explicit score still accepted",
             "constraint_score": 0.91,
-        },
-        {
-            "tool": "file_write",
-            "path": "/workspace/output/report.txt",
-            "content": "legacy alias still accepted",
-            "alignment_score": 0.84,
-        },
-        {
-            "tool": "file_write",
-            "path": "/workspace/output/report.txt",
-            "content": "needs revision",
-            "relift5_score": 0.65,
-        },
-        {
-            "tool": "http_request",
-            "url": "https://api.openai.com/v1/responses",
-            "method": "POST",
-            "constraint_score": 0.81,
         },
         {
             "tool": "http_request",
             "url": "https://evil.example.net/steal",
             "method": "POST",
-            "constraint_score": 0.95,
         },
         {
             "tool": "shell",
             "command": "rm -rf /",
-            "constraint_score": 0.99,
         },
     ]
 
